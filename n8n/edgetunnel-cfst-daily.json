@@ -1,0 +1,151 @@
+{
+  "name": "edgetunnel 每日优选IP自动更新",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "days", "triggerAtHour": 4, "triggerAtMinute": 0 }
+          ]
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "每日 04:00 触发",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/cfst && ./cfst -f ip.txt -o result.csv -p 20 -tl 300 -dn 5 -tp 443 && cat result.csv"
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "运行 CFST 测速",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "notes": "在 n8n 宿主机上执行 CFST，请改成你自己的路径。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const raw = $input.first().json.stdout || '';\nconst TOP_N = 10;\nconst PORTS = [443];\nconst lines = raw.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean);\nif (lines.length && /IP\\s*地址|^IP,/i.test(lines[0])) lines.shift();\nconst picked = [];\nfor (const line of lines) {\n  const cols = line.split(',');\n  const ip = (cols[0] || '').trim();\n  if (!/^\\d{1,3}(\\.\\d{1,3}){3}$/.test(ip)) continue;\n  const delay = (cols[4] || '').trim();\n  const speed = (cols[5] || '').trim();\n  const port = PORTS[picked.length % PORTS.length];\n  picked.push(ip + ':' + port + '#CF-' + (picked.length + 1) + '-' + speed + 'MB-' + delay + 'ms');\n  if (picked.length >= TOP_N) break;\n}\nif (picked.length === 0) { throw new Error('CFST 未产出可用 IP，请检查测速命令与 result.csv'); }\nreturn [{ json: { addTxt: picked.join('\\n'), count: picked.length } }];"
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "解析 result.csv",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-DOMAIN.example.com/login",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "User-Agent", "value": "edgetunnel-n8n/1.0" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "password", "value": "YOUR_ADMIN_PASSWORD" }
+          ]
+        },
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "登录获取 Cookie",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0],
+      "notes": "User-Agent 必须与下一步完全一致，否则 Cookie 校验不通过。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const res = $input.first().json;\nconst raw = res.headers && (res.headers['set-cookie'] || res.headers['Set-Cookie']);\nconst cookieHeader = Array.isArray(raw) ? raw.join('; ') : (raw || '');\nconst m = cookieHeader.match(/(?:^|;\\s*)auth=([^;]+)/);\nif (!m) { throw new Error('登录失败：未拿到 auth Cookie，请检查 ADMIN 密码与域名。HTTP ' + res.statusCode); }\nconst parsed = $('解析 result.csv').first().json;\nreturn [{ json: { authCookie: 'auth=' + m[1], addTxt: parsed.addTxt, count: parsed.count } }];"
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "提取 auth Cookie",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-DOMAIN.example.com/admin/ADD.txt",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "User-Agent", "value": "edgetunnel-n8n/1.0" },
+            { "name": "Cookie", "value": "={{ $json.authCookie }}" },
+            { "name": "Content-Type", "value": "text/plain;charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/plain;charset=utf-8",
+        "body": "={{ $json.addTxt }}",
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "写入 ADD.txt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            {
+              "id": "check-success",
+              "leftValue": "={{ $json.body && $json.body.success === true }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "是否写入成功",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=edgetunnel 优选IP 已更新：{{ $('解析 result.csv').first().json.count }} 个\n{{ $('解析 result.csv').first().json.addTxt }}",
+        "additionalFields": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Telegram 通知（可选）",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1540, -100],
+      "disabled": true,
+      "notes": "默认关闭，需要配置 Telegram 凭据并填写 chatId。"
+    }
+  ],
+  "connections": {
+    "每日 04:00 触发": { "main": [[{ "node": "运行 CFST 测速", "type": "main", "index": 0 }]] },
+    "运行 CFST 测速": { "main": [[{ "node": "解析 result.csv", "type": "main", "index": 0 }]] },
+    "解析 result.csv": { "main": [[{ "node": "登录获取 Cookie", "type": "main", "index": 0 }]] },
+    "登录获取 Cookie": { "main": [[{ "node": "提取 auth Cookie", "type": "main", "index": 0 }]] },
+    "提取 auth Cookie": { "main": [[{ "node": "写入 ADD.txt", "type": "main", "index": 0 }]] },
+    "写入 ADD.txt": { "main": [[{ "node": "是否写入成功", "type": "main", "index": 0 }]] },
+    "是否写入成功": { "main": [[{ "node": "Telegram 通知（可选）", "type": "main", "index": 0 }], []] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "meta": { "instanceId": "edgetunnel-doc" },
+  "tags": []
+}
